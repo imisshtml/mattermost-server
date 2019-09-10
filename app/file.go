@@ -122,6 +122,19 @@ func (a *App) RemoveFile(path string) *model.AppError {
 	return backend.RemoveFile(path)
 }
 
+func (a *App) ListDirectory(path string) ([]string, *model.AppError) {
+	backend, err := a.FileBackend()
+	if err != nil {
+		return nil, err
+	}
+	paths, err := backend.ListDirectory(path)
+	if err != nil {
+		return nil, err
+	}
+
+	return *paths, nil
+}
+
 func (a *App) GetInfoForFilename(post *model.Post, teamId string, filename string) *model.FileInfo {
 	// Find the path from the Filename of the form /{channelId}/{userId}/{uid}/{nameWithExtension}
 	split := strings.SplitN(filename, "/", 5)
@@ -192,13 +205,12 @@ func (a *App) FindTeamIdForFilename(post *model.Post, filename string) string {
 	name, _ := url.QueryUnescape(split[4])
 
 	// This post is in a direct channel so we need to figure out what team the files are stored under.
-	result := <-a.Srv.Store.Team().GetTeamsByUserId(post.UserId)
-	if result.Err != nil {
-		mlog.Error(fmt.Sprintf("Unable to get teams when migrating post to use FileInfo, err=%v", result.Err), mlog.String("post_id", post.Id))
+	teams, err := a.Srv.Store.Team().GetTeamsByUserId(post.UserId)
+	if err != nil {
+		mlog.Error(fmt.Sprintf("Unable to get teams when migrating post to use FileInfo, err=%v", err), mlog.String("post_id", post.Id))
 		return ""
 	}
 
-	teams := result.Data.([]*model.Team)
 	if len(teams) == 1 {
 		// The user has only one team so the post must've been sent from it
 		return teams[0].Id
@@ -239,7 +251,7 @@ func (a *App) MigrateFilenamesToFileInfos(post *model.Post) []*model.FileInfo {
 	// Find the team that was used to make this post since its part of the file path that isn't saved in the Filename
 	var teamId string
 	if channel.TeamId == "" {
-		// This post was made in a cross-team DM channel so we need to find where its files were saved
+		// This post was made in a cross-team DM channel, so we need to find where its files were saved
 		teamId = a.FindTeamIdForFilename(post, filenames[0])
 	} else {
 		teamId = channel.TeamId
@@ -275,7 +287,8 @@ func (a *App) MigrateFilenamesToFileInfos(post *model.Post) []*model.FileInfo {
 
 	if newPost := result.Posts[post.Id]; len(newPost.Filenames) != len(post.Filenames) {
 		// Another thread has already created FileInfos for this post, so just return those
-		fileInfos, err := a.Srv.Store.FileInfo().GetForPost(post.Id, true, false)
+		var fileInfos []*model.FileInfo
+		fileInfos, err = a.Srv.Store.FileInfo().GetForPost(post.Id, true, false, false)
 		if err != nil {
 			mlog.Error(fmt.Sprintf("Unable to get FileInfos for migrated post, err=%v", err), mlog.String("post_id", post.Id))
 			return []*model.FileInfo{}
@@ -290,7 +303,7 @@ func (a *App) MigrateFilenamesToFileInfos(post *model.Post) []*model.FileInfo {
 	savedInfos := make([]*model.FileInfo, 0, len(infos))
 	fileIds := make([]string, 0, len(filenames))
 	for _, info := range infos {
-		if _, err := a.Srv.Store.FileInfo().Save(info); err != nil {
+		if _, err = a.Srv.Store.FileInfo().Save(info); err != nil {
 			mlog.Error(
 				fmt.Sprintf("Unable to save file info when migrating post to use FileInfos, err=%v", err),
 				mlog.String("post_id", post.Id),
@@ -312,8 +325,8 @@ func (a *App) MigrateFilenamesToFileInfos(post *model.Post) []*model.FileInfo {
 	newPost.FileIds = fileIds
 
 	// Update Posts to clear Filenames and set FileIds
-	if result := <-a.Srv.Store.Post().Update(newPost, post); result.Err != nil {
-		mlog.Error(fmt.Sprintf("Unable to save migrated post when migrating to use FileInfos, new_file_ids=%v, old_filenames=%v, err=%v", newPost.FileIds, post.Filenames, result.Err), mlog.String("post_id", post.Id))
+	if _, err = a.Srv.Store.Post().Update(newPost, post); err != nil {
+		mlog.Error(fmt.Sprintf("Unable to save migrated post when migrating to use FileInfos, new_file_ids=%v, old_filenames=%v, err=%v", newPost.FileIds, post.Filenames, err), mlog.String("post_id", post.Id))
 		return []*model.FileInfo{}
 	}
 	return savedInfos

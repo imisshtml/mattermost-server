@@ -36,7 +36,7 @@ func setupTestHelper(enterprise bool, tb testing.TB) *TestHelper {
 	store := mainHelper.GetStore()
 	store.DropAllTables()
 
-	memoryStore, err := config.NewMemoryStore()
+	memoryStore, err := config.NewMemoryStoreWithOptions(&config.MemoryStoreOptions{IgnoreEnvironmentOverrides: true})
 	if err != nil {
 		panic("failed to initialize memory store: " + err.Error())
 	}
@@ -296,6 +296,26 @@ func (me *TestHelper) CreatePost(channel *model.Channel) *model.Post {
 	return post
 }
 
+func (me *TestHelper) CreateMessagePost(channel *model.Channel, message string) *model.Post {
+	post := &model.Post{
+		UserId:    me.BasicUser.Id,
+		ChannelId: channel.Id,
+		Message:   message,
+		CreateAt:  model.GetMillis() - 10000,
+	}
+
+	utils.DisableDebugLogForTest()
+	var err *model.AppError
+	if post, err = me.App.CreatePost(post, channel, false); err != nil {
+		mlog.Error(err.Error())
+
+		time.Sleep(time.Second)
+		panic(err)
+	}
+	utils.EnableDebugLogForTest()
+	return post
+}
+
 func (me *TestHelper) LinkUserToTeam(user *model.User, team *model.Team) {
 	utils.DisableDebugLogForTest()
 
@@ -387,17 +407,17 @@ func (me *TestHelper) CreateGroup() *model.Group {
 func (me *TestHelper) CreateEmoji() *model.Emoji {
 	utils.DisableDebugLogForTest()
 
-	result := <-me.App.Srv.Store.Emoji().Save(&model.Emoji{
+	emoji, err := me.App.Srv.Store.Emoji().Save(&model.Emoji{
 		CreatorId: me.BasicUser.Id,
 		Name:      model.NewRandomString(10),
 	})
-	if result.Err != nil {
-		panic(result.Err)
+	if err != nil {
+		panic(err)
 	}
 
 	utils.EnableDebugLogForTest()
 
-	return result.Data.(*model.Emoji)
+	return emoji
 }
 
 func (me *TestHelper) AddReactionToPost(post *model.Post, user *model.User, emojiName string) *model.Reaction {
@@ -478,19 +498,19 @@ func (me *TestHelper) ResetEmojisMigration() {
 }
 
 func (me *TestHelper) CheckTeamCount(t *testing.T, expected int64) {
-	if r := <-me.App.Srv.Store.Team().AnalyticsTeamCount(); r.Err == nil {
-		if r.Data.(int64) != expected {
-			t.Fatalf("Unexpected number of teams. Expected: %v, found: %v", expected, r.Data.(int64))
-		}
-	} else {
+	teamCount, err := me.App.Srv.Store.Team().AnalyticsTeamCount()
+	if err != nil {
 		t.Fatalf("Failed to get team count.")
+	}
+	if teamCount != expected {
+		t.Fatalf("Unexpected number of teams. Expected: %v, found: %v", expected, teamCount)
 	}
 }
 
 func (me *TestHelper) CheckChannelsCount(t *testing.T, expected int64) {
-	if r := <-me.App.Srv.Store.Channel().AnalyticsTypeCount("", model.CHANNEL_OPEN); r.Err == nil {
-		if r.Data.(int64) != expected {
-			t.Fatalf("Unexpected number of channels. Expected: %v, found: %v", expected, r.Data.(int64))
+	if count, err := me.App.Srv.Store.Channel().AnalyticsTypeCount("", model.CHANNEL_OPEN); err == nil {
+		if count != expected {
+			t.Fatalf("Unexpected number of channels. Expected: %v, found: %v", expected, count)
 		}
 	} else {
 		t.Fatalf("Failed to get channel count.")

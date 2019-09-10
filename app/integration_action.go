@@ -27,6 +27,7 @@ import (
 	"strings"
 
 	"github.com/mattermost/mattermost-server/model"
+	"github.com/mattermost/mattermost-server/store"
 	"github.com/mattermost/mattermost-server/utils"
 )
 
@@ -61,8 +62,20 @@ func (a *App) DoPostActionWithCookie(postId, actionId, userId, selectedOption st
 
 	// See if the post exists in the DB, if so ignore the cookie.
 	// Start all queries here for parallel execution
-	pchan := a.Srv.Store.Post().GetSingle(postId)
-	cchan := a.Srv.Store.Channel().GetForPost(postId)
+	pchan := make(chan store.StoreResult, 1)
+	go func() {
+		post, err := a.Srv.Store.Post().GetSingle(postId)
+		pchan <- store.StoreResult{Data: post, Err: err}
+		close(pchan)
+	}()
+
+	cchan := make(chan store.StoreResult, 1)
+	go func() {
+		channel, err := a.Srv.Store.Channel().GetForPost(postId)
+		cchan <- store.StoreResult{Data: channel, Err: err}
+		close(cchan)
+	}()
+
 	result := <-pchan
 	if result.Err != nil {
 		if cookie == nil {
@@ -86,9 +99,7 @@ func (a *App) DoPostActionWithCookie(postId, actionId, userId, selectedOption st
 		rootPostId = cookie.RootPostId
 		upstreamURL = cookie.Integration.URL
 	} else {
-		// Get action metadata from the database
 		post := result.Data.(*model.Post)
-
 		result = <-cchan
 		if result.Err != nil {
 			return "", result.Err
@@ -196,6 +207,20 @@ func (a *App) DoPostActionWithCookie(postId, actionId, userId, selectedOption st
 // Perform an HTTP POST request to an integration's action endpoint.
 // Caller must consume and close returned http.Response as necessary.
 func (a *App) DoActionRequest(rawURL string, body []byte) (*http.Response, *model.AppError) {
+	inURL, err := url.Parse(rawURL)
+	if err != nil {
+		return nil, model.NewAppError("DoActionRequest", "api.post.do_action.action_integration.app_error", nil, err.Error(), http.StatusBadRequest)
+	}
+
+	siteURL, _ := url.Parse(*a.Config().ServiceSettings.SiteURL)
+	rawURLPath := path.Clean(rawURL)
+	if siteURL != nil && (strings.HasPrefix(rawURLPath, "/plugins/") || strings.HasPrefix(rawURLPath, "plugins/")) {
+		inURL.Scheme = siteURL.Scheme
+		inURL.Host = siteURL.Host
+		inURL.Path = path.Join("/", siteURL.Path, rawURLPath)
+		rawURL = inURL.String()
+	}
+
 	req, err := http.NewRequest("POST", rawURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, model.NewAppError("DoActionRequest", "api.post.do_action.action_integration.app_error", nil, err.Error(), http.StatusBadRequest)
@@ -205,10 +230,8 @@ func (a *App) DoActionRequest(rawURL string, body []byte) (*http.Response, *mode
 
 	// Allow access to plugin routes for action buttons
 	var httpClient *http.Client
-	url, _ := url.Parse(rawURL)
-	siteURL, _ := url.Parse(*a.Config().ServiceSettings.SiteURL)
 	subpath, _ := utils.GetSubpathFromConfig(a.Config())
-	if (url.Hostname() == "localhost" || url.Hostname() == "127.0.0.1" || url.Hostname() == siteURL.Hostname()) && strings.HasPrefix(url.Path, path.Join(subpath, "plugins")) {
+	if (inURL.Hostname() == "localhost" || inURL.Hostname() == "127.0.0.1" || inURL.Hostname() == siteURL.Hostname()) && strings.HasPrefix(inURL.Path, path.Join(subpath, "plugins")) {
 		req.Header.Set(model.HEADER_AUTH, "Bearer "+a.Session.Token)
 		httpClient = a.HTTPService.MakeClient(true)
 	} else {

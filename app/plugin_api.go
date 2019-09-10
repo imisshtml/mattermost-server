@@ -81,6 +81,11 @@ func (api *PluginAPI) GetConfig() *model.Config {
 	return api.app.GetSanitizedConfig()
 }
 
+// GetUnsanitizedConfig gets the configuration for a system admin without removing secrets.
+func (api *PluginAPI) GetUnsanitizedConfig() *model.Config {
+	return api.app.Config().Clone()
+}
+
 func (api *PluginAPI) SaveConfig(config *model.Config) *model.AppError {
 	return api.app.SaveConfig(config, true)
 }
@@ -189,7 +194,7 @@ func (api *PluginAPI) UpdateTeamMemberRoles(teamId, userId, newRoles string) (*m
 }
 
 func (api *PluginAPI) GetTeamStats(teamId string) (*model.TeamStats, *model.AppError) {
-	return api.app.GetTeamStats(teamId)
+	return api.app.GetTeamStats(teamId, nil)
 }
 
 func (api *PluginAPI) CreateUser(user *model.User) (*model.User, *model.AppError) {
@@ -342,7 +347,11 @@ func (api *PluginAPI) GetChannelStats(channelId string) (*model.ChannelStats, *m
 	if err != nil {
 		return nil, err
 	}
-	return &model.ChannelStats{ChannelId: channelId, MemberCount: memberCount}, nil
+	guestCount, err := api.app.GetChannelMemberCount(channelId)
+	if err != nil {
+		return nil, err
+	}
+	return &model.ChannelStats{ChannelId: channelId, MemberCount: memberCount, GuestCount: guestCount}, nil
 }
 
 func (api *PluginAPI) GetDirectChannel(userId1, userId2 string) (*model.Channel, *model.AppError) {
@@ -500,12 +509,7 @@ func (api *PluginAPI) SetProfileImage(userId string, data []byte) *model.AppErro
 		return err
 	}
 
-	fileReader := bytes.NewReader(data)
-	err = api.app.SetProfileImageFromFile(userId, fileReader)
-	if err != nil {
-		return err
-	}
-	return nil
+	return api.app.SetProfileImageFromFile(userId, bytes.NewReader(data))
 }
 
 func (api *PluginAPI) GetEmojiList(sortBy string, page, perPage int) ([]*model.Emoji, *model.AppError) {
@@ -580,12 +584,7 @@ func (api *PluginAPI) SetTeamIcon(teamId string, data []byte) *model.AppError {
 		return err
 	}
 
-	fileReader := bytes.NewReader(data)
-	err = api.app.SetTeamIconFromFile(team, fileReader)
-	if err != nil {
-		return err
-	}
-	return nil
+	return api.app.SetTeamIconFromFile(team, bytes.NewReader(data))
 }
 
 func (api *PluginAPI) OpenInteractiveDialog(dialog model.OpenDialogRequest) *model.AppError {
@@ -620,7 +619,7 @@ func (api *PluginAPI) SendMail(to, subject, htmlBody string) *model.AppError {
 		return model.NewAppError("SendMail", "plugin_api.send_mail.missing_htmlbody", nil, "", http.StatusBadRequest)
 	}
 
-	return api.app.SendMail(to, subject, htmlBody)
+	return api.app.SendNotificationMail(to, subject, htmlBody)
 }
 
 // Plugin Section
@@ -664,6 +663,10 @@ func (api *PluginAPI) KVSet(key string, value []byte) *model.AppError {
 
 func (api *PluginAPI) KVCompareAndSet(key string, oldValue, newValue []byte) (bool, *model.AppError) {
 	return api.app.CompareAndSetPluginKey(api.id, key, oldValue, newValue)
+}
+
+func (api *PluginAPI) KVCompareAndDelete(key string, oldValue []byte) (bool, *model.AppError) {
+	return api.app.CompareAndDeletePluginKey(api.id, key, oldValue)
 }
 
 func (api *PluginAPI) KVSetWithExpiry(key string, value []byte, expireInSeconds int64) *model.AppError {
@@ -755,4 +758,28 @@ func (api *PluginAPI) UpdateBotActive(userId string, active bool) (*model.Bot, *
 
 func (api *PluginAPI) PermanentDeleteBot(userId string) *model.AppError {
 	return api.app.PermanentDeleteBot(userId)
+}
+
+func (api *PluginAPI) GetBotIconImage(userId string) ([]byte, *model.AppError) {
+	if _, err := api.app.GetBot(userId, true); err != nil {
+		return nil, err
+	}
+
+	return api.app.GetBotIconImage(userId)
+}
+
+func (api *PluginAPI) SetBotIconImage(userId string, data []byte) *model.AppError {
+	if _, err := api.app.GetBot(userId, true); err != nil {
+		return err
+	}
+
+	return api.app.SetBotIconImage(userId, bytes.NewReader(data))
+}
+
+func (api *PluginAPI) DeleteBotIconImage(userId string) *model.AppError {
+	if _, err := api.app.GetBot(userId, true); err != nil {
+		return err
+	}
+
+	return api.app.DeleteBotIconImage(userId)
 }

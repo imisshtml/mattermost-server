@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"runtime"
+	"time"
 
 	"github.com/mattermost/mattermost-server/mlog"
 	"github.com/mattermost/mattermost-server/model"
@@ -26,6 +27,7 @@ func (api *API) InitSystem() {
 
 	api.BaseRoutes.ApiRoot.Handle("/audits", api.ApiSessionRequired(getAudits)).Methods("GET")
 	api.BaseRoutes.ApiRoot.Handle("/email/test", api.ApiSessionRequired(testEmail)).Methods("POST")
+	api.BaseRoutes.ApiRoot.Handle("/site_url/test", api.ApiSessionRequired(testSiteURL)).Methods("POST")
 	api.BaseRoutes.ApiRoot.Handle("/file/s3_test", api.ApiSessionRequired(testS3)).Methods("POST")
 	api.BaseRoutes.ApiRoot.Handle("/database/recycle", api.ApiSessionRequired(databaseRecycle)).Methods("POST")
 	api.BaseRoutes.ApiRoot.Handle("/caches/invalidate", api.ApiSessionRequired(invalidateCaches)).Methods("POST")
@@ -41,30 +43,82 @@ func (api *API) InitSystem() {
 }
 
 func getSystemPing(c *Context, w http.ResponseWriter, r *http.Request) {
+	reqs := c.App.Config().ClientRequirements
+
+	s := make(map[string]string)
+	s[model.STATUS] = model.STATUS_OK
+	s["AndroidLatestVersion"] = reqs.AndroidLatestVersion
+	s["AndroidMinVersion"] = reqs.AndroidMinVersion
+	s["DesktopLatestVersion"] = reqs.DesktopLatestVersion
+	s["DesktopMinVersion"] = reqs.DesktopMinVersion
+	s["IosLatestVersion"] = reqs.IosLatestVersion
+	s["IosMinVersion"] = reqs.IosMinVersion
 
 	actualGoroutines := runtime.NumGoroutine()
-	if *c.App.Config().ServiceSettings.GoroutineHealthThreshold <= 0 || actualGoroutines <= *c.App.Config().ServiceSettings.GoroutineHealthThreshold {
-		m := make(map[string]string)
-		m[model.STATUS] = model.STATUS_OK
-
-		reqs := c.App.Config().ClientRequirements
-		m["AndroidLatestVersion"] = reqs.AndroidLatestVersion
-		m["AndroidMinVersion"] = reqs.AndroidMinVersion
-		m["DesktopLatestVersion"] = reqs.DesktopLatestVersion
-		m["DesktopMinVersion"] = reqs.DesktopMinVersion
-		m["IosLatestVersion"] = reqs.IosLatestVersion
-		m["IosMinVersion"] = reqs.IosMinVersion
-
-		w.Write([]byte(model.MapToJson(m)))
-	} else {
-		rdata := map[string]string{}
-		rdata["status"] = "unhealthy"
-
-		mlog.Warn(fmt.Sprintf("The number of running goroutines is over the health threshold %v of %v", actualGoroutines, *c.App.Config().ServiceSettings.GoroutineHealthThreshold))
-
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(model.MapToJson(rdata)))
+	if *c.App.Config().ServiceSettings.GoroutineHealthThreshold > 0 && actualGoroutines >= *c.App.Config().ServiceSettings.GoroutineHealthThreshold {
+		mlog.Warn(fmt.Sprintf("The number of running goroutines (%v) is over the health threshold (%v)", actualGoroutines, *c.App.Config().ServiceSettings.GoroutineHealthThreshold))
+		s[model.STATUS] = model.STATUS_UNHEALTHY
 	}
+
+	// Enhanced ping health check:
+	// If an extra form value is provided then perform extra health checks for
+	// database and file storage backends.
+	if r.FormValue("get_server_status") != "" {
+		dbStatusKey := "database_status"
+		s[dbStatusKey] = model.STATUS_OK
+
+		// Database Write/Read Check
+		currentTime := fmt.Sprintf("%d", time.Now().Unix())
+		healthCheckKey := "health_check"
+
+		writeErr := c.App.Srv.Store.System().SaveOrUpdate(&model.System{
+			Name:  healthCheckKey,
+			Value: currentTime,
+		})
+		if writeErr != nil {
+			mlog.Debug(fmt.Sprintf("Unable to write to database: %s", writeErr.Error()))
+			s[dbStatusKey] = model.STATUS_UNHEALTHY
+			s[model.STATUS] = model.STATUS_UNHEALTHY
+		} else {
+			healthCheck, readErr := c.App.Srv.Store.System().GetByName(healthCheckKey)
+			if readErr != nil {
+				mlog.Debug(fmt.Sprintf("Unable to read from database: %s", readErr.Error()))
+				s[dbStatusKey] = model.STATUS_UNHEALTHY
+				s[model.STATUS] = model.STATUS_UNHEALTHY
+			} else if healthCheck.Value != currentTime {
+				mlog.Debug(fmt.Sprintf("Incorrect healthcheck value, expected %s, got %s", currentTime, healthCheck.Value))
+				s[dbStatusKey] = model.STATUS_UNHEALTHY
+				s[model.STATUS] = model.STATUS_UNHEALTHY
+			} else {
+				mlog.Debug("Able to write/read files to database")
+			}
+		}
+
+		filestoreStatusKey := "filestore_status"
+		s[filestoreStatusKey] = model.STATUS_OK
+		license := c.App.License()
+		backend, appErr := filesstore.NewFileBackend(&c.App.Config().FileSettings, license != nil && *license.Features.Compliance)
+		if appErr == nil {
+			appErr = backend.TestConnection()
+			if appErr != nil {
+				s[filestoreStatusKey] = model.STATUS_UNHEALTHY
+				s[model.STATUS] = model.STATUS_UNHEALTHY
+			}
+		} else {
+			mlog.Debug(fmt.Sprintf("Unable to get filestore for ping status: %s", appErr.Error()))
+			s[filestoreStatusKey] = model.STATUS_UNHEALTHY
+			s[model.STATUS] = model.STATUS_UNHEALTHY
+		}
+
+		w.Header().Set(model.STATUS, s[model.STATUS])
+		w.Header().Set(dbStatusKey, s[dbStatusKey])
+		w.Header().Set(filestoreStatusKey, s[filestoreStatusKey])
+	}
+
+	if s[model.STATUS] != model.STATUS_OK {
+		w.WriteHeader(http.StatusInternalServerError)
+	}
+	w.Write([]byte(model.MapToJson(s)))
 }
 
 func testEmail(c *Context, w http.ResponseWriter, r *http.Request) {
@@ -84,6 +138,32 @@ func testEmail(c *Context, w http.ResponseWriter, r *http.Request) {
 	}
 
 	err := c.App.TestEmail(c.App.Session.UserId, cfg)
+	if err != nil {
+		c.Err = err
+		return
+	}
+
+	ReturnStatusOK(w)
+}
+
+func testSiteURL(c *Context, w http.ResponseWriter, r *http.Request) {
+	if !c.App.SessionHasPermissionTo(c.App.Session, model.PERMISSION_MANAGE_SYSTEM) {
+		c.SetPermissionError(model.PERMISSION_MANAGE_SYSTEM)
+		return
+	}
+
+	if *c.App.Config().ExperimentalSettings.RestrictSystemAdmin {
+		c.Err = model.NewAppError("testSiteURL", "api.restricted_system_admin", nil, "", http.StatusForbidden)
+		return
+	}
+
+	props := model.MapFromJson(r.Body)
+	siteURL := props["site_url"]
+	if siteURL == "" {
+		c.SetInvalidParam("site_url")
+		return
+	}
+	err := c.App.TestSiteURL(siteURL)
 	if err != nil {
 		c.Err = err
 		return

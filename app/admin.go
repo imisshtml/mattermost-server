@@ -4,6 +4,7 @@
 package app
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"time"
@@ -174,9 +175,23 @@ func (a *App) RecycleDatabaseConnection() {
 	mlog.Warn("Finished recycling the database connection.")
 }
 
+func (a *App) TestSiteURL(siteURL string) *model.AppError {
+	url := fmt.Sprintf("%s/api/v4/system/ping", siteURL)
+	res, err := http.Get(url)
+	if err != nil || res.StatusCode != 200 {
+		return model.NewAppError("testSiteURL", "app.admin.test_site_url.failure", nil, "", http.StatusBadRequest)
+	}
+
+	return nil
+}
+
 func (a *App) TestEmail(userId string, cfg *model.Config) *model.AppError {
 	if len(*cfg.EmailSettings.SMTPServer) == 0 {
 		return model.NewAppError("testEmail", "api.admin.test_email.missing_server", nil, utils.T("api.context.invalid_param.app_error", map[string]interface{}{"Name": "SMTPServer"}), http.StatusBadRequest)
+	}
+
+	if !*cfg.EmailSettings.SendEmailNotifications {
+		return nil
 	}
 
 	// if the user hasn't changed their email settings, fill in the actual SMTP password so that
